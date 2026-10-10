@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "dji4g.sms",
+  "name": "DJI 短信",
+  "version": "1.0.0",
+  "description": "本地短信收件箱、确认发送与隐私通知",
+  "kinds": ["service", "bar-widget"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "DJI 短信",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

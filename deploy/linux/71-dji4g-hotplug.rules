@@ -1,0 +1,6 @@
+# Lets the Omarchy SMS panel follow the Baiwang module. The alias gives the
+# module a port-independent unit name, dev-dji4g.device, which the panel asks
+# systemd about; the panel's engine runs only while that unit is active.
+# dji4g-sms-panel.service, bound to the same unit, tells the panel at once
+# when the module comes and goes.
+ACTION!="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2ca3", ATTR{idProduct}=="4006", TAG+="systemd", ENV{SYSTEMD_ALIAS}+="/dev/dji4g", ENV{SYSTEMD_USER_WANTS}+="dji4g-sms-panel.service"

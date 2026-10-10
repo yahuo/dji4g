@@ -1,0 +1,37 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.20000,0.78000,0.86000,1.00000",
+      "display-p3:0.07000,0.38000,0.84000,1.00000"
+    ]
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "bars.svg",
+          "name" : "bars"
+        },
+        {
+          "glass" : true,
+          "image-name" : "bubble.svg",
+          "name" : "bubble"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.4
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "macOS"
+    ]
+  }
+}

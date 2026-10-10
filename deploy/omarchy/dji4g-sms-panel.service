@@ -1,0 +1,13 @@
+# Optional, needs 71-dji4g-hotplug.rules: tells the Omarchy SMS panel to look
+# at the module as soon as it is plugged in or unplugged. Without it the panel
+# notices by itself, up to 30 s late.
+[Unit]
+Description=Notify the Omarchy SMS panel when the Baiwang module comes and goes
+BindsTo=dev-dji4g.device
+After=dev-dji4g.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-omarchy-shell -q dji4g.sms.service sync
+ExecStop=-omarchy-shell -q dji4g.sms.service sync
