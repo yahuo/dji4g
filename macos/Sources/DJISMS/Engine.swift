@@ -27,6 +27,8 @@ final class EngineClient {
     var detail: MessageDetail?
     var preview: SendPreview?
     var sendState = ""
+    /// Counts from the last confirmed storage cleanup, until the panel closes.
+    var cleaned: CleanupResult?
     var error = ""
     private(set) var busy = false
     private(set) var pendingAction = ""
@@ -73,6 +75,10 @@ final class EngineClient {
     }
     func markAllRead() { request(["action": "mark_all_read"]) }
     func acknowledge() { request(["action": "acknowledge"]) }
+    func cleanup() {
+        cleaned = nil
+        request(["action": "cleanup", "confirmed": true])
+    }
 
     func prepare(recipient: String, body: String) {
         preview = nil
@@ -159,6 +165,9 @@ final class EngineClient {
         if isResponse && (value["action"] as? String) == "mark_all_read" && type == "snapshot" {
             listener?.engineMarkedAllRead()
         }
+        if isResponse && (value["action"] as? String) == "cleanup" && type == "snapshot" {
+            cleaned = CleanupResult(value["cleaned"] as? JSONObject)
+        }
         if isResponse || type == "detail" { listener?.engineSettled() }
     }
 
@@ -201,6 +210,7 @@ final class EngineClient {
         snapshot = Snapshot()
         detail = nil
         preview = nil
+        cleaned = nil
         error = ""
     }
 

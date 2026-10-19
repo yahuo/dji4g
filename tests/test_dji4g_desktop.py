@@ -22,9 +22,13 @@ class FakeGateway:
         self.sends = []
         self.failure = None
         self.send_state = 'accepted_by_modem'
+        self.ready = True
+        self.cleanups = 0
+        self.cleanup_result = {'deleted': 0, 'kept': 0}
+        self.cleanup_failure = None
 
     def status(self):
-        return {'connected': True, 'ready': True,
+        return {'connected': True, 'ready': self.ready,
                 'modem': {'sim_ready': True, 'registered': True}}
 
     def list_messages(self, limit=50, after_id=None):
@@ -43,6 +47,12 @@ class FakeGateway:
         if self.failure:
             raise self.failure
         return {'state': self.send_state}
+
+    def cleanup(self):
+        self.cleanups += 1
+        if self.cleanup_failure:
+            raise self.cleanup_failure
+        return self.cleanup_result
 
     def receive(self, identifier, direction='inbound'):
         self.messages.append({'id': identifier, 'peer': '+8613800000000',
@@ -141,6 +151,26 @@ class DesktopTests(unittest.TestCase):
         self.controller.poll()
         self.assertEqual(self.controller.command({'action': 'mark_all_read'})['unread'], 0)
         self.assertEqual(len(self.gateway.messages), 1)
+
+    def test_cleanup_needs_confirmation_and_a_ready_modem(self):
+        for request in ({'action': 'cleanup'}, {'action': 'cleanup', 'confirmed': 'yes'}):
+            with self.assertRaises(DesktopError):
+                self.controller.command(request)
+        self.gateway.ready = False
+        with self.assertRaises(DesktopError):
+            self.controller.command({'action': 'cleanup', 'confirmed': True})
+        self.assertEqual(self.gateway.cleanups, 0)
+
+    def test_cleanup_returns_counts_with_a_fresh_snapshot(self):
+        self.gateway.cleanup_result = {'deleted': 35, 'kept': 1}
+        result = self.controller.command({'action': 'cleanup', 'confirmed': True})
+        self.assertEqual(result['type'], 'snapshot')
+        self.assertEqual(result['cleaned'], {'deleted': 35, 'kept': 1})
+
+        self.gateway.cleanup_failure = OSError('unplugged')
+        with self.assertRaises(DesktopError) as raised:
+            self.controller.command({'action': 'cleanup', 'confirmed': True})
+        self.assertIn('本机记录不受影响', str(raised.exception))
 
     def preview(self):
         return self.controller.command({'action': 'preview', 'recipient': '10086', 'body': 'test only'})
@@ -318,6 +348,8 @@ class EngineTests(unittest.TestCase):
                 adapter.send('+8613800000000', 'hi', idempotency_key='k', confirmed=True)
                 core.send_confirmed.assert_called_once_with(
                     '+8613800000000', 'hi', idempotency_key='k', confirmed=True)
+                core.cleanup_storage.return_value = {'deleted': 2, 'kept': 0}
+                self.assertEqual(adapter.cleanup(), {'deleted': 2, 'kept': 0})
             finally:
                 store.close()
 

@@ -3,7 +3,9 @@
 
 The modem worker and message store run in this process; there is no network
 API. stdin/stdout carry UI requests and responses, not shell commands. No
-message content is logged. Only the user-confirmed send operation sends SMS.
+message content is logged. Only the user-confirmed send operation sends SMS,
+and only a user-confirmed cleanup deletes SMS from the module, after they are
+stored locally.
 """
 
 from __future__ import annotations
@@ -180,6 +182,9 @@ class EmbeddedGateway:
             recipient, body, idempotency_key=idempotency_key, confirmed=confirmed,
         )
 
+    def cleanup(self) -> dict[str, int]:
+        return self.gateway.cleanup_storage()
+
 
 class DesktopController:
     def __init__(
@@ -266,6 +271,19 @@ class DesktopController:
         if action == "cancel":
             self.draft = None
             return {"type": "cancelled"}
+        if action == "cleanup":
+            # Frees ME/SM slots; the messages stay in the local store.
+            if request.get("confirmed") is not True:
+                raise DesktopError("必须先确认清理")
+            if not self.gateway.status().get("ready"):
+                raise DesktopError("模块未就绪，暂时无法清理")
+            try:
+                result = self.gateway.cleanup()
+            except Exception as error:
+                raise DesktopError("清理中断，模块里的短信可能只删除了一部分；本机记录不受影响") from error
+            return {**self.snapshot(), "cleaned": {
+                "deleted": int(result.get("deleted", 0)), "kept": int(result.get("kept", 0)),
+            }}
         if action == "acknowledge":
             # The user checked the outcome themselves; this only stops the
             # warning and can never make a consumed key usable again.

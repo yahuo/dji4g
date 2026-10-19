@@ -34,6 +34,7 @@ LOGGER = logging.getLogger(__name__)
 MAX_MESSAGE_LIMIT = 500
 MAX_OUTBOUND_SEGMENTS = 10
 SEND_REQUEST_TIMEOUT = MAX_OUTBOUND_SEGMENTS * 60.0 + 5.0
+CLEANUP_REQUEST_TIMEOUT = 300.0
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _DEVICE_EVENT_TYPES = {
     "device.connection",
@@ -70,6 +71,8 @@ class ModemAdapter(Protocol):
     def probe(self) -> Mapping[str, Any]: ...
 
     def list_messages(self, storage: str) -> Iterable[Any]: ...
+
+    def delete_messages(self, storage: str, indexes: Iterable[int]) -> int: ...
 
     def send_message(self, recipient: str, body: str) -> Any: ...
 
@@ -1689,6 +1692,9 @@ class SmsGateway:
     def poll_now(self, timeout: float = 30.0) -> int:
         return self._submit("poll", timeout=timeout)
 
+    def cleanup_storage(self, timeout: float = CLEANUP_REQUEST_TIMEOUT) -> dict[str, int]:
+        return self._submit("cleanup", timeout=timeout)
+
     def preview_send(self, recipient: Any, body: Any) -> dict[str, Any]:
         return build_send_preview(recipient, body)
 
@@ -1759,11 +1765,18 @@ class SmsGateway:
                         next_poll = time.monotonic() + self.poll_interval
                     elif job.operation == "send":
                         job.result = self._perform_send(*job.args)
+                    elif job.operation == "cleanup":
+                        try:
+                            job.result = self._perform_cleanup()
+                        finally:
+                            # A failure inside cleanup closed the modem.
+                            if self._modem is None:
+                                next_probe = self._next_retry_at
                     else:
                         raise ValueError("unknown modem operation")
                 except BaseException as error:
                     job.error = error
-                    if job.operation != "send":
+                    if job.operation not in {"send", "cleanup"}:
                         self._record_modem_failure(error)
                         next_probe = self._next_retry_at
                 finally:
@@ -1950,6 +1963,52 @@ class SmsGateway:
             self._last_poll_at = _utc_now()
             self._last_error_code = None
         return ingested
+
+    def _perform_cleanup(self) -> dict[str, int]:
+        """Free module storage, deleting only SMS whose raw PDU is stored here.
+
+        Each storage is listed and ingested first, so a message that arrived
+        after the last poll is saved before its slot is freed; one that cannot
+        be saved stays on the module.  A refusal touches no modem state.
+        """
+        if not self._ready:
+            raise GatewayUnavailable("modem is not ready")
+        modem = self._modem
+        list_messages = getattr(modem, "list_messages", None)
+        delete_messages = getattr(modem, "delete_messages", None)
+        if (
+            list_messages is None
+            or delete_messages is None
+            or not _method_accepts_storage(list_messages)
+        ):
+            raise GatewayUnavailable("modem adapter does not provide storage cleanup")
+        deleted = kept = 0
+        try:
+            for storage in self.storages:
+                indexes: list[int] = []
+                for message in list_messages(storage):
+                    index = _object_field(message, "index")
+                    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                        kept += 1
+                        continue
+                    try:
+                        self.store.ingest(message, storage=storage)
+                    except ValueError as error:
+                        LOGGER.warning("inbound SMS kept on the module (%s)", type(error).__name__)
+                        kept += 1
+                        continue
+                    indexes.append(index)
+                if indexes:
+                    deleted += delete_messages(storage, indexes)
+        except BaseException as error:
+            self._record_modem_failure(error)
+            raise
+        try:
+            self._perform_probe()
+        except BaseException as error:
+            # The slots are already free; a later probe reports them.
+            self._record_modem_failure(error)
+        return {"deleted": deleted, "kept": kept}
 
     def _perform_send(
         self, outbound_id: int, recipient: str, body: str

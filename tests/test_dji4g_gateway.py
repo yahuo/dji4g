@@ -149,6 +149,46 @@ class MutableStatusModem(FakeModem):
             self._leave()
 
 
+def slot(message, storage, index):
+    message.storage = storage
+    message.index = index
+    return message
+
+
+class StorageModem(FakeModem):
+    def __init__(self, slots):
+        super().__init__()
+        self.slots = {name: list(messages) for name, messages in slots.items()}
+        self.deleted = []
+        self.delete_error = None
+
+    def status(self):
+        status = super().status()
+        status["storage"] = {
+            name: {"used": len(messages), "total": 10} for name, messages in self.slots.items()
+        }
+        return status
+
+    def list_messages(self, storage):
+        self._enter("list:" + storage)
+        try:
+            return list(self.slots.get(storage, ()))
+        finally:
+            self._leave()
+
+    def delete_messages(self, storage, indexes):
+        self._enter("delete:" + storage)
+        try:
+            if self.delete_error is not None:
+                raise self.delete_error
+            indexes = list(indexes)
+            self.deleted.append((storage, indexes))
+            self.slots[storage] = [m for m in self.slots[storage] if m.index not in indexes]
+            return len(indexes)
+        finally:
+            self._leave()
+
+
 class StoreTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -544,6 +584,78 @@ class GatewayWorkerTests(unittest.TestCase):
             [message["body"] for message in self.store.list_messages()],
             ["second", "first"],
         )
+
+    def test_cleanup_frees_only_slots_whose_sms_is_stored(self):
+        modem = StorageModem(
+            {
+                "ME": [
+                    slot(incoming("001101", "first"), "ME", 0),
+                    slot(SimpleNamespace(raw_pdu="", sender="10086", text="broken"), "ME", 1),
+                ],
+                "SM": [slot(incoming("001102", "second"), "SM", 4)],
+            }
+        )
+        self.gateway = dji4g_gateway.SmsGateway(
+            self.store,
+            modem_factory=lambda: modem,
+            poll_interval=60,
+            status_interval=60,
+        )
+        self.gateway.start()
+        self.assertTrue(wait_until(lambda: len(self.store.list_messages()) == 2))
+        # Arrives after the last poll: cleanup must store it before freeing it.
+        modem.slots["ME"].append(slot(incoming("001103", "late"), "ME", 2))
+
+        result = self.gateway.cleanup_storage(timeout=2)
+
+        self.assertEqual(result, {"deleted": 3, "kept": 1})
+        self.assertEqual(modem.deleted, [("ME", [0, 2]), ("SM", [4])])
+        self.assertEqual(
+            sorted(message["body"] for message in self.store.list_messages()),
+            ["first", "late", "second"],
+        )
+        self.assertEqual([m.text for m in modem.slots["ME"]], ["broken"])
+        storage = self.gateway.status_snapshot()["modem"]["storage"]
+        self.assertEqual(storage["ME"]["used"], 1)
+        self.assertEqual(storage["SM"]["used"], 0)
+        self.assertEqual(modem.max_active, 1)
+        self.assertEqual(len(modem.thread_ids), 1)
+
+    def test_cleanup_refusal_leaves_the_modem_connected(self):
+        modem = FakeModem()
+        self.gateway = dji4g_gateway.SmsGateway(
+            self.store,
+            modem_factory=lambda: modem,
+            poll_interval=60,
+            status_interval=60,
+        )
+        self.gateway.start()
+        self.assertTrue(wait_until(lambda: self.gateway.ready()))
+
+        with self.assertRaises(dji4g_gateway.GatewayUnavailable):
+            self.gateway.cleanup_storage(timeout=2)
+
+        self.assertTrue(self.gateway.ready())
+        self.assertIsNone(self.gateway.status_snapshot()["last_error_code"])
+
+    def test_cleanup_failure_is_reported_and_reconnects(self):
+        modem = StorageModem({"ME": [slot(incoming("001101", "first"), "ME", 0)], "SM": []})
+        modem.delete_error = OSError("unplugged")
+        self.gateway = dji4g_gateway.SmsGateway(
+            self.store,
+            modem_factory=lambda: modem,
+            poll_interval=60,
+            status_interval=60,
+            reconnect_initial=0.05,
+        )
+        self.gateway.start()
+        self.assertTrue(wait_until(lambda: self.gateway.ready()))
+
+        with self.assertRaises(OSError):
+            self.gateway.cleanup_storage(timeout=2)
+
+        self.assertEqual([m["body"] for m in self.store.list_messages()], ["first"])
+        self.assertTrue(wait_until(lambda: self.gateway.ready()))
 
     def test_disconnect_uses_backoff_then_recovers(self):
         modem = FakeModem()
