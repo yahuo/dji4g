@@ -12,6 +12,8 @@ Item {
   property var detail: null
   property var preview: null
   property string sendState: ""
+  // Counts from the last confirmed storage cleanup, until the panel closes.
+  property var cleaned: null
   property string error: ""
   property bool busy: false
   property bool discardSensitiveReply: false
@@ -45,6 +47,7 @@ Item {
   // Nothing read from the module outlives it.
   function forget() {
     snapshot = ({ online: false, messages: [], unread: 0 })
+    cleaned = null
     error = ""
   }
 
@@ -68,6 +71,10 @@ Item {
   }
   function markAllRead() { request({ action: "mark_all_read" }) }
   function acknowledge() { request({ action: "acknowledge" }) }
+  function cleanup() {
+    cleaned = null
+    request({ action: "cleanup", confirmed: true })
+  }
   function prepare(recipient, body) {
     preview = null
     sendState = ""
@@ -109,6 +116,7 @@ Item {
     }
     if (value.type === "snapshot") {
       snapshot = value.online ? value : Object.assign({}, snapshot, { online: false, ready: false, error: value.error })
+      if (value.response && value.action === "cleanup") cleaned = value.cleaned || null
       // An engine that lost the module may mean it was unplugged.
       if (!value.online || !value.connected) syncDevice()
     } else if (value.type === "detail") {

@@ -24,6 +24,8 @@ Panel {
   property real now: Date.now()
   property int phraseIndex: 0
   property int seenUnread: 0
+  // The cleanup prompt is showing; nothing is deleted until it is confirmed.
+  property bool cleanupArmed: false
 
   readonly property var snap: service ? service.snapshot : ({ online: false, messages: [], unread: 0 })
   readonly property bool busy: !service || service.busy
@@ -49,6 +51,12 @@ Panel {
   readonly property var facts: linkFacts()
   readonly property string heroMeta: linkUp && facts.length > 0 ? facts[phraseIndex % facts.length] : statusText
   readonly property var notices: currentNotices()
+  // Something is stored on the module that a cleanup could free.
+  readonly property bool cleanupAvailable: !!snap.ready && ["SM", "ME"].some(function(name) {
+    var store = (snap.storage || {})[name]
+    return !!store && store.used > 0
+  })
+  readonly property bool canCleanup: cleanupAvailable && !busy && sendState !== "sending"
   readonly property real listCap: Math.max(Style.space(160), Math.min(Style.space(420), panel.availableCardHeight - Style.space(200)))
 
   readonly property string recipientText: recipientField.text.trim()
@@ -128,6 +136,14 @@ Panel {
     else if (sendState === "unknown") list.push({ text: "发送结果未知，请先核实，勿重复发送", urgent: true, action: "acknowledge" })
     else if ((snap.uncertain_sends || 0) > 0)
       list.push({ text: "有 " + snap.uncertain_sends + " 条发送结果未确认，请先核实，勿重复发送", urgent: true, action: "acknowledge" })
+    if (busy && service.pendingAction === "cleanup") {
+      list.push({ text: "正在清理模块短信…", urgent: false, action: "" })
+      return list
+    }
+    if (cleanupArmed) {
+      list.push({ text: "从 SIM 卡和模块存储删除已存到本机的短信？本机记录保留", urgent: false, action: "confirm_cleanup" })
+      return list
+    }
     var storage = snap.storage || {}
     var names = { SM: "SIM 卡", ME: "模块" }
     for (var name in names) {
@@ -136,8 +152,14 @@ Panel {
       list.push({
         text: names[name] + "短信存储" + (store.state === "full" ? "已满，新短信可能收不到" : "即将存满")
           + "（" + store.used + "/" + store.total + "）",
-        urgent: store.state === "full", action: ""
+        urgent: store.state === "full", action: cleanupAvailable ? "cleanup" : ""
       })
+    }
+    var cleaned = service.cleaned
+    if (cleaned) {
+      var text = cleaned.deleted > 0 ? "已从模块删除 " + cleaned.deleted + " 条短信，本机记录保留" : "模块里没有可清理的短信"
+      if (cleaned.kept > 0) text += "；" + cleaned.kept + " 条未能存到本机，仍留在模块"
+      list.push({ text: text, urgent: false, action: "" })
     }
     return list
   }
@@ -273,6 +295,19 @@ Panel {
     if (!service) return
     if (service.sendState === "unknown") service.sendState = ""
     service.acknowledge()
+  }
+
+  function armCleanup() {
+    if (!service || !cleanupAvailable) return
+    service.cleaned = null
+    cleanupArmed = true
+  }
+  function cancelCleanup() { cleanupArmed = false }
+  // Deletes from the module only the SMS already stored on this machine.
+  function confirmCleanup() {
+    if (!cleanupArmed || !canCleanup) return
+    cleanupArmed = false
+    service.cleanup()
   }
 
   function setCursor(index) {
@@ -421,7 +456,8 @@ Panel {
 
   function composeKey(event, index) {
     if (event.key === Qt.Key_Escape) {
-      if (pending) {
+      if (cleanupArmed) cancelCleanup()
+      else if (pending) {
         invalidatePreview()
         bodyEdit.forceActiveFocus()
       } else leaveCompose()
@@ -459,6 +495,7 @@ Panel {
       wantLatest = false
       revealFailed = false
       copied = ""
+      cleanupArmed = false
       if (!keepDraft) {
         mode = "inbox"
         recipientField.text = ""
@@ -466,6 +503,7 @@ Panel {
       }
       if (service) {
         if (service.sendState !== "sending") service.sendState = ""
+        service.cleaned = null
         service.clearSensitive()
       }
     }
@@ -937,7 +975,8 @@ Panel {
       }
       onActivateRequested: sms.activateCursor()
       onCloseRequested: {
-        if (sms.mode === "compose") sms.leaveCompose()
+        if (sms.cleanupArmed) sms.cancelCleanup()
+        else if (sms.mode === "compose") sms.leaveCompose()
         else if (sms.expandedId >= 0) sms.collapse()
         else sms.close()
       }
@@ -1027,7 +1066,7 @@ Panel {
               id: notice
               required property var modelData
               width: noticeColumn.width
-              implicitHeight: Math.max(noticeIcon.implicitHeight, noticeText.implicitHeight, noticeAction.visible ? noticeAction.implicitHeight : 0)
+              implicitHeight: Math.max(noticeIcon.implicitHeight, noticeText.implicitHeight, noticeActions.visible ? noticeActions.implicitHeight : 0)
 
               SmsGlyph {
                 id: noticeIcon
@@ -1040,23 +1079,60 @@ Panel {
                 id: noticeText
                 anchors.left: noticeIcon.right
                 anchors.leftMargin: Style.space(8)
-                anchors.right: noticeAction.visible ? noticeAction.left : parent.right
-                anchors.rightMargin: noticeAction.visible ? Style.space(8) : 0
+                anchors.right: noticeActions.visible ? noticeActions.left : parent.right
+                anchors.rightMargin: noticeActions.visible ? Style.space(8) : 0
                 anchors.verticalCenter: parent.verticalCenter
                 text: notice.modelData.text
                 color: notice.modelData.urgent ? sms.urgent : sms.foreground
                 wrapMode: Text.Wrap
               }
-              PanelActionButton {
-                id: noticeAction
-                visible: notice.modelData.action === "acknowledge"
+              Row {
+                id: noticeActions
+                visible: notice.modelData.action !== ""
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                iconText: glyph.check
-                tooltipText: "已核实，不再提示"
-                foreground: sms.foreground
-                fontFamily: sms.fontFamily
-                onClicked: sms.acknowledge()
+                spacing: Style.space(4)
+
+                PanelActionButton {
+                  visible: notice.modelData.action === "acknowledge"
+                  iconText: glyph.check
+                  tooltipText: "已核实，不再提示"
+                  foreground: sms.foreground
+                  fontFamily: sms.fontFamily
+                  onClicked: sms.acknowledge()
+                }
+                Button {
+                  visible: notice.modelData.action === "cleanup"
+                  text: "清理"
+                  tooltipText: "删除模块里已存到本机的短信"
+                  bordered: true
+                  enabled: sms.canCleanup
+                  opacity: enabled ? 1 : 0.45
+                  foreground: sms.foreground
+                  fontFamily: sms.fontFamily
+                  onClicked: sms.armCleanup()
+                }
+                Button {
+                  visible: notice.modelData.action === "confirm_cleanup"
+                  text: "取消"
+                  tooltipText: "取消 (Esc)"
+                  bordered: true
+                  foreground: sms.foreground
+                  fontFamily: sms.fontFamily
+                  onClicked: sms.cancelCleanup()
+                }
+                Button {
+                  visible: notice.modelData.action === "confirm_cleanup"
+                  text: "删除"
+                  tooltipText: "删除已存到本机的短信，本机记录保留"
+                  bordered: true
+                  selected: true
+                  enabled: sms.canCleanup
+                  opacity: enabled ? 1 : 0.45
+                  foreground: sms.urgent
+                  fontFamily: sms.fontFamily
+                  onClicked: sms.confirmCleanup()
+                }
               }
             }
           }

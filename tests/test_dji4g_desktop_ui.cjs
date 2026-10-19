@@ -10,14 +10,14 @@ function service() {
   const context = {
     snapshot: { online: true, ready: true, messages: [], unread: 0 },
     busy: false, pendingAction: '', discardSensitiveReply: false,
-    detail: null, preview: null, error: '', sendState: '', deviceUp: true,
+    detail: null, preview: null, error: '', sendState: '', deviceUp: true, cleaned: null,
     worker: { running: true, write: line => writes.push(JSON.parse(line)) },
     probe: { running: false, again: false },
   };
   context.root = context;
   vm.createContext(context);
   const names = ['request', 'showMessage', 'prepare', 'submit', 'clearSensitive', 'receive',
-    'syncDevice', 'applyDevice', 'forget'];
+    'syncDevice', 'applyDevice', 'forget', 'cleanup'];
   for (const name of names) {
     const body = source.match(new RegExp('  function ' + name + '\\([^]*?\\n  }'));
     assert.ok(body, name);
@@ -66,6 +66,22 @@ test('closing while details are in flight does not retain the SMS body', () => {
   s.clearSensitive();
   s.reply({ type: 'detail', message: { id: 1, body: 'private' } });
   assert.equal(s.detail, null);
+});
+
+test('cleanup is always confirmed and its counts come only from its own reply', () => {
+  const s = service();
+  s.cleanup();
+  assert.deepEqual(s.writes, [{ action: 'cleanup', confirmed: true }]);
+  s.receive(JSON.stringify({ type: 'snapshot', online: true, ready: true, messages: [] }));
+  assert.equal(s.busy, true);
+  assert.equal(s.cleaned, null);
+  s.reply({ type: 'snapshot', action: 'cleanup', online: true, ready: true, messages: [],
+    cleaned: { deleted: 35, kept: 1 } });
+  assert.equal(s.busy, false);
+  assert.equal(s.cleaned.deleted, 35);
+  assert.equal(s.cleaned.kept, 1);
+  s.forget();
+  assert.equal(s.cleaned, null);
 });
 
 test('background snapshots do not release an in-flight action', () => {

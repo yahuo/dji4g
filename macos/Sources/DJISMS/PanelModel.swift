@@ -5,11 +5,15 @@ enum ComposeField: Hashable {
     case recipient, body, preview, hold
 }
 
+enum NoticeAction {
+    case none, acknowledge, cleanup, confirmCleanup
+}
+
 struct Notice: Identifiable, Equatable {
     let id: String
     let text: String
     let urgent: Bool
-    let acknowledge: Bool
+    var action: NoticeAction = .none
 }
 
 /// The panel's interaction state, ported from Panel.qml: an inbox of
@@ -33,6 +37,8 @@ final class PanelModel: EngineListener {
     var phraseIndex = 0
     var metaVisible = true
     var appError = ""
+    /// The cleanup prompt is showing; nothing is deleted until it is confirmed.
+    var cleanupArmed = false
     /// Whether the module is plugged in; the engine runs only while it is.
     var deviceUp = false
 
@@ -122,35 +128,53 @@ final class PanelModel: EngineListener {
 
     var notices: [Notice] {
         var list: [Notice] = []
-        if !appError.isEmpty { list.append(Notice(id: "app", text: appError, urgent: true, acknowledge: false)) }
+        if !appError.isEmpty { list.append(Notice(id: "app", text: appError, urgent: true)) }
         if !engine.error.isEmpty {
-            list.append(Notice(id: "error", text: engine.error, urgent: true, acknowledge: false))
+            list.append(Notice(id: "error", text: engine.error, urgent: true))
         } else if !snap.online && !snap.error.isEmpty {
-            list.append(Notice(id: "error", text: snap.error, urgent: true, acknowledge: false))
+            list.append(Notice(id: "error", text: snap.error, urgent: true))
         }
         switch sendState {
         case "sending":
-            list.append(Notice(id: "send", text: "正在发送，请勿重复操作…", urgent: false, acknowledge: false))
+            list.append(Notice(id: "send", text: "正在发送，请勿重复操作…", urgent: false))
         case "accepted_by_modem":
-            list.append(Notice(id: "send", text: "模块已接受短信（不代表对方已收到）", urgent: false, acknowledge: false))
+            list.append(Notice(id: "send", text: "模块已接受短信（不代表对方已收到）", urgent: false))
         case "failed":
-            list.append(Notice(id: "send", text: "发送失败，模块未接受短信", urgent: true, acknowledge: false))
+            list.append(Notice(id: "send", text: "发送失败，模块未接受短信", urgent: true))
         case "unknown":
-            list.append(Notice(id: "send", text: "发送结果未知，请先核实，勿重复发送", urgent: true, acknowledge: true))
+            list.append(Notice(id: "send", text: "发送结果未知，请先核实，勿重复发送", urgent: true, action: .acknowledge))
         default:
             if snap.uncertainSends > 0 {
                 list.append(Notice(id: "send", text: "有 \(snap.uncertainSends) 条发送结果未确认，请先核实，勿重复发送",
-                                   urgent: true, acknowledge: true))
+                                   urgent: true, action: .acknowledge))
             }
+        }
+        if busy && engine.pendingAction == "cleanup" {
+            list.append(Notice(id: "cleanup", text: "正在清理模块短信…", urgent: false))
+            return list
+        }
+        if cleanupArmed {
+            list.append(Notice(id: "cleanup", text: "从 SIM 卡和模块存储删除已存到本机的短信？本机记录保留",
+                               urgent: false, action: .confirmCleanup))
+            return list
         }
         for (name, label) in [("SM", "SIM 卡"), ("ME", "模块")] {
             guard let store = snap.storage[name], store.state != "normal", !store.state.isEmpty else { continue }
             let state = store.state == "full" ? "已满，新短信可能收不到" : "即将存满"
             list.append(Notice(id: "storage-\(name)", text: "\(label)短信存储\(state)（\(store.used)/\(store.total)）",
-                               urgent: store.state == "full", acknowledge: false))
+                               urgent: store.state == "full", action: cleanupAvailable ? .cleanup : .none))
+        }
+        if let cleaned = engine.cleaned {
+            var text = cleaned.deleted > 0 ? "已从模块删除 \(cleaned.deleted) 条短信，本机记录保留" : "模块里没有可清理的短信"
+            if cleaned.kept > 0 { text += "；\(cleaned.kept) 条未能存到本机，仍留在模块" }
+            list.append(Notice(id: "cleaned", text: text, urgent: false))
         }
         return list
     }
+
+    /// Something is stored on the module that a cleanup could free.
+    var cleanupAvailable: Bool { snap.ready && snap.storage.values.contains { $0.used > 0 } }
+    var canCleanup: Bool { cleanupAvailable && !busy && sendState != "sending" }
 
     var recipientText: String { recipient.trimmingCharacters(in: .whitespacesAndNewlines) }
     var recipientValid: Bool { SmsFormat.isValidRecipient(recipientText) }
@@ -175,6 +199,21 @@ final class PanelModel: EngineListener {
 
     func refresh() { engine.refresh() }
     func markAllRead() { if unread > 0 { engine.markAllRead() } }
+
+    func armCleanup() {
+        guard cleanupAvailable else { return }
+        engine.cleaned = nil
+        cleanupArmed = true
+    }
+
+    func cancelCleanup() { cleanupArmed = false }
+
+    /// Deletes from the module only the SMS already stored on this Mac.
+    func confirmCleanup() {
+        guard cleanupArmed, canCleanup else { return }
+        cleanupArmed = false
+        engine.cleanup()
+    }
 
     /// Only silences the warning; nothing is ever sent again from here.
     func acknowledge() {
@@ -386,7 +425,9 @@ final class PanelModel: EngineListener {
 
     /// Esc inside the panel: unwind one level at a time.
     func escape() {
-        if mode == "compose" {
+        if cleanupArmed {
+            cancelCleanup()
+        } else if mode == "compose" {
             if pending != nil {
                 invalidatePreview()
                 focus = .body
@@ -464,6 +505,8 @@ final class PanelModel: EngineListener {
         autoPreview = false
         revealFailed = false
         copied = ""
+        cleanupArmed = false
+        engine.cleaned = nil
         releaseHold()
         focus = nil
         if !keepDraft {

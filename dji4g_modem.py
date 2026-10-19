@@ -1,8 +1,8 @@
 """SMS operations over the DJI Baiwang AT transport.
 
-This module contains the device-facing SMS workflow.  It deliberately does not
-delete messages and keeps the codec and the USB transport independently
-testable.
+This module contains the device-facing SMS workflow.  It deletes only the
+storage slots a caller names (``delete_messages``) and keeps the codec and the
+USB transport independently testable.
 """
 
 from __future__ import annotations
@@ -442,6 +442,32 @@ class SmsModem:
             if not response_ok(response):
                 raise SmsModemError("The modem could not read the requested SMS")
             return parse_cmgr_pdu(response, storage=storage.upper(), index=index)
+
+    def delete_messages(self, storage: str, indexes: Iterable[int]) -> int:
+        """Delete the given slots of one storage; return how many were deleted.
+
+        The caller takes the slots from a listing made by this same AT owner.
+        Nothing else deletes, and the module stores a new SMS only in a free
+        slot, so a listed index still holds the listed message.
+        """
+        storage = storage.upper()
+        if storage not in SMS_STORAGES:
+            raise SmsModemError("Invalid SMS storage name")
+        targets = list(indexes)
+        if any(isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in targets):
+            raise SmsModemError("SMS index must be a non-negative integer")
+        if not targets:
+            return 0
+        deleted = 0
+        with self.temporary_settings():
+            self._checked(_cpms_command((storage,)) or "", timeout=5.0)
+            for index in sorted(set(targets)):
+                self._checked(f"AT+CMGD={index}", timeout=10.0)
+                deleted += 1
+            self._storage_usage.update(
+                parse_cpms_usage(self._checked("AT+CPMS?"), selected_storage=storage)
+            )
+        return deleted
 
     def preview(
         self,

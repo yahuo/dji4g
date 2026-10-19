@@ -79,6 +79,8 @@ private struct HeroView: View {
                     if !loginItem.error.isEmpty {
                         Text(loginItem.error)
                     }
+                    Button("清理模块短信…", action: model.armCleanup)
+                        .disabled(!model.cleanupAvailable)
                     Divider()
                     Button("退出") { NSApp.terminate(nil) }
                 } label: {
@@ -121,8 +123,25 @@ private struct NoticeList: View {
                         .foregroundStyle(notice.urgent ? Color.red : Color.primary)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    if notice.acknowledge {
+                    switch notice.action {
+                    case .none:
+                        EmptyView()
+                    case .acknowledge:
                         IconButton(symbol: "checkmark", help: "已核实，不再提示", action: model.acknowledge)
+                    case .cleanup:
+                        Button("清理", action: model.armCleanup)
+                            .controlSize(.small)
+                            .disabled(!model.canCleanup)
+                            .help("删除模块里已存到本机的短信")
+                    case .confirmCleanup:
+                        Button("取消", action: model.cancelCleanup)
+                            .controlSize(.small)
+                            .help("取消 (Esc)")
+                        Button("删除", action: model.confirmCleanup)
+                            .controlSize(.small)
+                            .buttonStyle(.borderedProminent)
+                            .tint(.red)
+                            .disabled(!model.canCleanup)
                     }
                 }
             }

@@ -126,6 +126,17 @@ struct SendPreview: Equatable {
     }
 }
 
+struct CleanupResult: Equatable {
+    let deleted: Int
+    let kept: Int  // left on the module because they could not be stored
+
+    init?(_ object: JSONObject?) {
+        guard let object, let deleted = int(object["deleted"]) else { return nil }
+        self.deleted = deleted
+        kept = int(object["kept"]) ?? 0
+    }
+}
+
 struct IncomingMessage {
     let id: Int
     let peer: String

@@ -57,6 +57,14 @@ class RestoreFailsAfterSubmitTransport(FakeTransport):
         return super().send(command, timeout=timeout, completion=completion)
 
 
+class DeletingTransport(FakeTransport):
+    def send(self, command, timeout=3.0, completion=None):
+        if command == "AT+CPMS?" and any(c.startswith("AT+CMGD=") for c in self.commands):
+            self.commands.append(command)
+            return '+CPMS: "SM",1,10,"SM",1,10,"SM",1,10\nOK'
+        return super().send(command, timeout=timeout, completion=completion)
+
+
 class ParserTests(unittest.TestCase):
     def test_parse_current_sms_settings(self):
         self.assertEqual(dji4g_modem.parse_cmgf("+CMGF: 0\nOK"), 0)
@@ -192,6 +200,32 @@ class SmsModemTests(unittest.TestCase):
                 "ME": {"used": 4, "total": 23},
             },
         )
+
+    def test_delete_frees_named_slots_and_restores_settings(self):
+        transport = DeletingTransport()
+        modem = dji4g_modem.SmsModem(transport)
+
+        self.assertEqual(modem.delete_messages("sm", [3, 1, 3]), 2)
+
+        commands = transport.commands
+        deletes = [command for command in commands if command.startswith("AT+CMGD=")]
+        self.assertEqual(deletes, ["AT+CMGD=1", "AT+CMGD=3"])
+        self.assertLess(commands.index('AT+CPMS="SM","SM","SM"'), commands.index("AT+CMGD=1"))
+        self.assertGreater(
+            len(commands) - 1 - commands[::-1].index('AT+CPMS="ME","ME","ME"'),
+            commands.index("AT+CMGD=3"),
+        )
+        self.assertEqual(modem.health()["storage"]["SM"], {"used": 1, "total": 10})
+
+    def test_delete_rejects_bad_targets_before_touching_storage(self):
+        transport = FakeTransport()
+        modem = dji4g_modem.SmsModem(transport)
+
+        self.assertEqual(modem.delete_messages("ME", []), 0)
+        for storage, indexes in (("BM", [1]), ("ME", [-1]), ("ME", [True]), ("ME", ["1"])):
+            with self.assertRaises(dji4g_modem.SmsModemError):
+                modem.delete_messages(storage, indexes)
+        self.assertEqual(transport.commands, [])
 
     def test_pdu_send_uses_prompt_and_ctrl_z(self):
         transport = FakeTransport()
