@@ -10,6 +10,7 @@ protocol EngineListener: AnyObject {
     func engineReceived(_ messages: [IncomingMessage])
     func engineShowed(_ id: Int)
     func engineMarkedAllRead()
+    func engineDeleted(_ id: Int)
     func engineSnapshotWillChange()
     func engineSnapshotDidChange()
 }
@@ -79,6 +80,7 @@ final class EngineClient {
         cleaned = nil
         request(["action": "cleanup", "confirmed": true])
     }
+    func deleteMessage(_ id: Int) { request(["action": "delete", "id": id, "confirmed": true]) }
 
     func prepare(recipient: String, body: String) {
         preview = nil
@@ -167,6 +169,10 @@ final class EngineClient {
         }
         if isResponse && (value["action"] as? String) == "cleanup" && type == "snapshot" {
             cleaned = CleanupResult(value["cleaned"] as? JSONObject)
+        }
+        if isResponse && (value["action"] as? String) == "delete" && type == "snapshot",
+           let id = value["deleted"] as? Int {
+            listener?.engineDeleted(id)
         }
         if isResponse || type == "detail" { listener?.engineSettled() }
     }

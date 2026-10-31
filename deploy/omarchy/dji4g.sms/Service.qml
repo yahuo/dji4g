@@ -75,6 +75,7 @@ Item {
     cleaned = null
     request({ action: "cleanup", confirmed: true })
   }
+  function deleteMessage(id) { request({ action: "delete", id: id, confirmed: true }) }
   function prepare(recipient, body) {
     preview = null
     sendState = ""

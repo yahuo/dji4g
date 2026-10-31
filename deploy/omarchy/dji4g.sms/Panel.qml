@@ -26,6 +26,8 @@ Panel {
   property int seenUnread: 0
   // The cleanup prompt is showing; nothing is deleted until it is confirmed.
   property bool cleanupArmed: false
+  // The row whose delete prompt is showing; nothing is deleted until it is confirmed.
+  property int deleteArmedId: -1
 
   readonly property var snap: service ? service.snapshot : ({ online: false, messages: [], unread: 0 })
   readonly property bool busy: !service || service.busy
@@ -57,6 +59,8 @@ Panel {
     return !!store && store.used > 0
   })
   readonly property bool canCleanup: cleanupAvailable && !busy && sendState !== "sending"
+  // Deleting touches only this machine, so it does not wait for the modem.
+  readonly property bool canDelete: !!snap.online && !busy
   readonly property real listCap: Math.max(Style.space(160), Math.min(Style.space(420), panel.availableCardHeight - Style.space(200)))
 
   readonly property string recipientText: recipientField.text.trim()
@@ -92,6 +96,7 @@ Panel {
     readonly property string reply: "󰑚"     // reply
     readonly property string key: "󰌆"       // key
     readonly property string send: "󰒊"      // send
+    readonly property string trash: "󰧧"     // delete-outline
     readonly property string alert: "󰗖"     // alert-circle-outline
     readonly property string info: "󰋽"      // information-outline
     readonly property string inbox: "󰚇"     // inbox
@@ -300,6 +305,7 @@ Panel {
   function armCleanup() {
     if (!service || !cleanupAvailable) return
     service.cleaned = null
+    deleteArmedId = -1
     cleanupArmed = true
   }
   function cancelCleanup() { cleanupArmed = false }
@@ -308,6 +314,20 @@ Panel {
     if (!cleanupArmed || !canCleanup) return
     cleanupArmed = false
     service.cleanup()
+  }
+
+  function armDelete(id) {
+    cleanupArmed = false
+    deleteArmedId = id
+  }
+  function cancelDelete() { deleteArmedId = -1 }
+  // Removes the SMS from this machine only; a copy on the module is left for
+  // cleanup to free and is never shown again.
+  function confirmDelete() {
+    if (deleteArmedId < 0 || !canDelete) return
+    var id = deleteArmedId
+    deleteArmedId = -1
+    service.deleteMessage(id)
   }
 
   function setCursor(index) {
@@ -337,6 +357,7 @@ Panel {
   // as soon as that row closes.
   function reveal(id) {
     if (!service) return
+    if (deleteArmedId !== id) deleteArmedId = -1
     expandedId = id
     revealFailed = false
     copied = ""
@@ -346,6 +367,7 @@ Panel {
 
   function collapse() {
     expandedId = -1
+    deleteArmedId = -1
     wantShow = false
     revealFailed = false
     copied = ""
@@ -496,6 +518,7 @@ Panel {
       revealFailed = false
       copied = ""
       cleanupArmed = false
+      deleteArmedId = -1
       if (!keepDraft) {
         mode = "inbox"
         recipientField.text = ""
@@ -795,6 +818,7 @@ Panel {
     readonly property var message: expanded ? sms.detail : null
     readonly property string code: message ? sms.findCode(message.body) : ""
     readonly property bool replyable: !!message && /^\+?[0-9]{3,15}$/.test(message.peer)
+    readonly property bool deleteArmed: expanded && sms.deleteArmedId === mid
 
     width: listColumn.width
     implicitHeight: summary.implicitHeight + Style.spacing.rowPaddingX + revealBox.height
@@ -906,7 +930,7 @@ Panel {
             Item {
               width: parent.width
               implicitHeight: Math.max(codeChip.implicitHeight, tools.implicitHeight)
-              visible: !!row.message
+              visible: !!row.message && !row.deleteArmed
 
               Button {
                 id: codeChip
@@ -943,6 +967,54 @@ Panel {
                   fontFamily: sms.fontFamily
                   onClicked: sms.startCompose(row.message.peer)
                 }
+                PanelActionButton {
+                  iconText: glyph.trash
+                  tooltipText: "从本机删除"
+                  foreground: sms.foreground
+                  fontFamily: sms.fontFamily
+                  onClicked: sms.armDelete(row.mid)
+                }
+              }
+            }
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(deletePrompt.implicitHeight, deleteActions.implicitHeight)
+              visible: !!row.message && row.deleteArmed
+
+              SmsText {
+                id: deletePrompt
+                anchors.left: parent.left
+                anchors.right: deleteActions.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                text: "从本机删除这条短信？删除后无法恢复"
+                wrapMode: Text.Wrap
+              }
+              Row {
+                id: deleteActions
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(4)
+
+                Button {
+                  text: "取消"
+                  tooltipText: "取消 (Esc)"
+                  bordered: true
+                  foreground: sms.foreground
+                  fontFamily: sms.fontFamily
+                  onClicked: sms.cancelDelete()
+                }
+                Button {
+                  text: "删除"
+                  tooltipText: "从本机删除这条短信"
+                  bordered: true
+                  selected: true
+                  enabled: sms.canDelete
+                  opacity: enabled ? 1 : 0.45
+                  foreground: sms.urgent
+                  fontFamily: sms.fontFamily
+                  onClicked: sms.confirmDelete()
+                }
               }
             }
           }
@@ -976,6 +1048,7 @@ Panel {
       onActivateRequested: sms.activateCursor()
       onCloseRequested: {
         if (sms.cleanupArmed) sms.cancelCleanup()
+        else if (sms.deleteArmedId >= 0) sms.cancelDelete()
         else if (sms.mode === "compose") sms.leaveCompose()
         else if (sms.expandedId >= 0) sms.collapse()
         else sms.close()

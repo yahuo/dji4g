@@ -43,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         model.onIncoming = { [weak self] messages in messages.forEach { self?.notifier?.post($0) } }
         model.onShown = { [weak self] id in self?.notifier?.remove(id) }
         model.onAllRead = { [weak self] in self?.notifier?.removeAll() }
+        model.onDeleted = { [weak self] id in self?.notifier?.remove(id) }
 
         usb.onChange = { [weak self] up in self?.deviceChanged(up) }
         usb.start()

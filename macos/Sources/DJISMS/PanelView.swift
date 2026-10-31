@@ -299,25 +299,43 @@ private struct MessageRowView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                HStack(spacing: 2) {
-                    if !code.isEmpty {
-                        Button { model.copyText("code") } label: {
-                            Label(code, systemImage: model.copied == "code" ? "checkmark" : "key")
-                                .monospacedDigit()
-                                .fontWeight(.semibold)
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.accentColor)
-                        .help("复制验证码 (C)")
+                if model.deleteArmedId == row.id {
+                    HStack(spacing: 8) {
+                        Text("从本机删除这条短信？删除后无法恢复")
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button("取消", action: model.cancelDelete)
+                            .controlSize(.small)
+                            .help("取消 (Esc)")
+                        Button("删除", action: model.confirmDelete)
+                            .controlSize(.small)
+                            .buttonStyle(.borderedProminent)
+                            .tint(.red)
+                            .disabled(!model.canDelete)
                     }
-                    Spacer()
-                    IconButton(symbol: model.copied == "body" ? "checkmark" : "doc.on.doc", help: "复制全文") {
-                        model.copyText("body")
-                    }
-                    if replyable {
-                        IconButton(symbol: "arrowshape.turn.up.left", help: "回复") {
-                            model.startCompose(message.peer)
+                } else {
+                    HStack(spacing: 2) {
+                        if !code.isEmpty {
+                            Button { model.copyText("code") } label: {
+                                Label(code, systemImage: model.copied == "code" ? "checkmark" : "key")
+                                    .monospacedDigit()
+                                    .fontWeight(.semibold)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.accentColor)
+                            .help("复制验证码 (C)")
                         }
+                        Spacer()
+                        IconButton(symbol: model.copied == "body" ? "checkmark" : "doc.on.doc", help: "复制全文") {
+                            model.copyText("body")
+                        }
+                        if replyable {
+                            IconButton(symbol: "arrowshape.turn.up.left", help: "回复") {
+                                model.startCompose(message.peer)
+                            }
+                        }
+                        IconButton(symbol: "trash", help: "从本机删除") { model.armDelete(row.id) }
                     }
                 }
             } else if model.revealFailed {
