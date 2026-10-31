@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds macos/build/DJISMS.app; `--install` also copies it to ~/Applications.
+# Builds macos/build/DJISMS.app; `--install` also copies it to /Applications.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -99,8 +99,7 @@ codesign --force --sign - --timestamp=none "$app"
 echo "built $app"
 
 if [ "$install" -eq 1 ]; then
-  target="$HOME/Applications/DJISMS.app"
-  mkdir -p "$HOME/Applications"
+  target="/Applications/DJISMS.app"
   rm -rf "$target"
   ditto "$app" "$target"
   echo "installed $target"
