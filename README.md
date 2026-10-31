@@ -96,7 +96,7 @@ lsusb -d 2ca3:4006
 
 ```bash
 macos/build.sh --install             # 不带参数时只生成 macos/build/DJISMS.app
-open ~/Applications/DJISMS.app
+open /Applications/DJISMS.app
 ```
 
 应用常驻后台、不占 Dock，没插模块时菜单栏不显示图标。应用退出后就不再随插拔启动，
