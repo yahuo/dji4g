@@ -4,8 +4,9 @@
 The modem worker and message store run in this process; there is no network
 API. stdin/stdout carry UI requests and responses, not shell commands. No
 message content is logged. Only the user-confirmed send operation sends SMS,
-and only a user-confirmed cleanup deletes SMS from the module, after they are
-stored locally.
+only a user-confirmed cleanup deletes SMS from the module, after they are
+stored locally, and only a user-confirmed delete removes one SMS from this
+machine.
 """
 
 from __future__ import annotations
@@ -185,6 +186,9 @@ class EmbeddedGateway:
     def cleanup(self) -> dict[str, int]:
         return self.gateway.cleanup_storage()
 
+    def delete_message(self, identifier: int) -> bool:
+        return self.gateway.store.delete_message(identifier)
+
 
 class DesktopController:
     def __init__(
@@ -271,6 +275,17 @@ class DesktopController:
         if action == "cancel":
             self.draft = None
             return {"type": "cancelled"}
+        if action == "delete":
+            # Local only: a copy on the module is left for cleanup to free.
+            if request.get("confirmed") is not True:
+                raise DesktopError("必须先确认删除")
+            identifier = request.get("id")
+            if isinstance(identifier, bool) or not isinstance(identifier, int) or identifier <= 0:
+                raise DesktopError("无效的短信编号")
+            if not self.gateway.delete_message(identifier):
+                raise DesktopError("短信不存在")
+            self.state.mark_read(identifier)
+            return {**self.snapshot(), "deleted": identifier}
         if action == "cleanup":
             # Frees ME/SM slots; the messages stay in the local store.
             if request.get("confirmed") is not True:

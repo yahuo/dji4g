@@ -404,6 +404,8 @@ class GatewayStore:
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._connection.execute("PRAGMA busy_timeout = 10000")
+        # Deleted SMS text is overwritten on disk, not left in free pages.
+        self._connection.execute("PRAGMA secure_delete = ON")
         self._create_schema()
 
     def __enter__(self) -> "GatewayStore":
@@ -434,7 +436,8 @@ class GatewayStore:
             complete INTEGER NOT NULL DEFAULT 1,
             concat_reference TEXT,
             concat_total INTEGER,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            deleted INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS concat_groups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -544,6 +547,14 @@ class GatewayStore:
         """
         with self._lock, self._connection:
             self._connection.executescript(schema)
+            message_columns = {
+                row["name"]
+                for row in self._connection.execute("PRAGMA table_info(messages)")
+            }
+            if "deleted" not in message_columns:
+                self._connection.execute(
+                    "ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0"
+                )
             columns = {
                 row["name"]
                 for row in self._connection.execute("PRAGMA table_info(concat_groups)")
@@ -830,23 +841,23 @@ class GatewayStore:
         with self._lock:
             if after_id is None and storage is None:
                 rows = self._connection.execute(
-                    "SELECT * FROM messages ORDER BY id DESC LIMIT ?", (limit,)
+                    "SELECT * FROM messages WHERE deleted = 0 ORDER BY id DESC LIMIT ?", (limit,)
                 ).fetchall()
             elif after_id is None:
                 rows = self._connection.execute(
-                    "SELECT * FROM messages WHERE storage = ? ORDER BY id DESC LIMIT ?",
+                    "SELECT * FROM messages WHERE deleted = 0 AND storage = ? ORDER BY id DESC LIMIT ?",
                     (storage, limit),
                 ).fetchall()
             elif storage is None:
                 rows = self._connection.execute(
-                    "SELECT * FROM messages WHERE id > ? ORDER BY id ASC LIMIT ?",
+                    "SELECT * FROM messages WHERE deleted = 0 AND id > ? ORDER BY id ASC LIMIT ?",
                     (after_id, limit),
                 ).fetchall()
             else:
                 rows = self._connection.execute(
                     """
                     SELECT * FROM messages
-                    WHERE id > ? AND storage = ? ORDER BY id ASC LIMIT ?
+                    WHERE deleted = 0 AND id > ? AND storage = ? ORDER BY id ASC LIMIT ?
                     """,
                     (after_id, storage, limit),
                 ).fetchall()
@@ -857,9 +868,45 @@ class GatewayStore:
             return None
         with self._lock:
             row = self._connection.execute(
-                "SELECT * FROM messages WHERE id = ?", (message_id,)
+                "SELECT * FROM messages WHERE id = ? AND deleted = 0", (message_id,)
             ).fetchone()
         return self._message_dict(row) if row is not None else None
+
+    def delete_message(self, message_id: int | None) -> bool:
+        """Wipe one inbound SMS from this machine; the module is not touched.
+
+        The row stays as a tombstone with only its fingerprint, so a copy still
+        on the module is a duplicate on the next poll instead of a new SMS, and
+        a later cleanup frees its slot.  Returns False if there is no such SMS.
+        """
+        if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
+            return False
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = self._connection.execute(
+                    """
+                    UPDATE messages SET deleted = 1, peer = '', body = '', raw_pdu = NULL
+                    WHERE id = ? AND deleted = 0
+                    """,
+                    (message_id,),
+                )
+                if cursor.rowcount == 0:
+                    self._connection.commit()
+                    return False
+                # A long SMS also keeps every segment's text.
+                self._connection.execute(
+                    """
+                    UPDATE concat_segments SET peer = '', body = '', raw_pdu = ''
+                    WHERE group_id IN (SELECT id FROM concat_groups WHERE message_id = ?)
+                    """,
+                    (message_id,),
+                )
+                self._connection.commit()
+                return True
+            except BaseException:
+                self._connection.rollback()
+                raise
 
     def count_concat_groups(self) -> int:
         with self._lock:

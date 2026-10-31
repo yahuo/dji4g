@@ -54,6 +54,11 @@ class FakeGateway:
             raise self.cleanup_failure
         return self.cleanup_result
 
+    def delete_message(self, identifier):
+        before = len(self.messages)
+        self.messages = [m for m in self.messages if m['id'] != identifier]
+        return len(self.messages) < before
+
     def receive(self, identifier, direction='inbound'):
         self.messages.append({'id': identifier, 'peer': '+8613800000000',
                               'body': 'private verification code 123456', 'complete': True,
@@ -171,6 +176,34 @@ class DesktopTests(unittest.TestCase):
         with self.assertRaises(DesktopError) as raised:
             self.controller.command({'action': 'cleanup', 'confirmed': True})
         self.assertIn('本机记录不受影响', str(raised.exception))
+
+    def test_delete_needs_confirmation_and_a_valid_id(self):
+        self.controller.poll()
+        self.gateway.receive(1)
+        self.controller.poll()
+        for request in ({'action': 'delete', 'id': 1}, {'action': 'delete', 'id': 1, 'confirmed': 'yes'},
+                        {'action': 'delete', 'id': True, 'confirmed': True},
+                        {'action': 'delete', 'id': '1', 'confirmed': True},
+                        {'action': 'delete', 'id': 0, 'confirmed': True},
+                        {'action': 'delete', 'id': 2, 'confirmed': True}):
+            with self.assertRaises(DesktopError):
+                self.controller.command(request)
+        self.assertEqual(len(self.gateway.messages), 1)
+
+    def test_delete_removes_one_message_and_its_unread_mark(self):
+        self.controller.poll()
+        self.gateway.receive(1)
+        self.gateway.receive(2)
+        self.controller.poll()
+        # Deleting needs no modem: it only touches this machine.
+        self.gateway.ready = False
+        result = self.controller.command({'action': 'delete', 'id': 1, 'confirmed': True})
+        self.assertEqual(result['type'], 'snapshot')
+        self.assertEqual(result['deleted'], 1)
+        self.assertEqual([m['id'] for m in result['messages']], [2])
+        self.assertEqual(result['unread'], 1)
+        self.assertEqual(self.state.unread_ids(), {2})
+        self.assertEqual(self.gateway.cleanups, 0)
 
     def preview(self):
         return self.controller.command({'action': 'preview', 'recipient': '10086', 'body': 'test only'})
@@ -350,6 +383,7 @@ class EngineTests(unittest.TestCase):
                     '+8613800000000', 'hi', idempotency_key='k', confirmed=True)
                 core.cleanup_storage.return_value = {'deleted': 2, 'kept': 0}
                 self.assertEqual(adapter.cleanup(), {'deleted': 2, 'kept': 0})
+                self.assertFalse(adapter.delete_message(1))
             finally:
                 store.close()
 

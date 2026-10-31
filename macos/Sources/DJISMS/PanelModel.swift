@@ -39,6 +39,8 @@ final class PanelModel: EngineListener {
     var appError = ""
     /// The cleanup prompt is showing; nothing is deleted until it is confirmed.
     var cleanupArmed = false
+    /// The row whose delete prompt is showing; nothing is deleted until it is confirmed.
+    var deleteArmedId: Int?
     /// Whether the module is plugged in; the engine runs only while it is.
     var deviceUp = false
 
@@ -62,6 +64,7 @@ final class PanelModel: EngineListener {
     @ObservationIgnored var onIncoming: (([IncomingMessage]) -> Void)?
     @ObservationIgnored var onShown: ((Int) -> Void)?
     @ObservationIgnored var onAllRead: (() -> Void)?
+    @ObservationIgnored var onDeleted: ((Int) -> Void)?
     @ObservationIgnored var onSnapshot: (() -> Void)?
     @ObservationIgnored private var cursorBeforeSync: Int?
     @ObservationIgnored private var pendingRevealId: Int?
@@ -175,6 +178,8 @@ final class PanelModel: EngineListener {
     /// Something is stored on the module that a cleanup could free.
     var cleanupAvailable: Bool { snap.ready && snap.storage.values.contains { $0.used > 0 } }
     var canCleanup: Bool { cleanupAvailable && !busy && sendState != "sending" }
+    /// Deleting touches only this Mac, so it does not wait for the modem.
+    var canDelete: Bool { snap.online && !busy }
 
     var recipientText: String { recipient.trimmingCharacters(in: .whitespacesAndNewlines) }
     var recipientValid: Bool { SmsFormat.isValidRecipient(recipientText) }
@@ -203,6 +208,7 @@ final class PanelModel: EngineListener {
     func armCleanup() {
         guard cleanupAvailable else { return }
         engine.cleaned = nil
+        deleteArmedId = nil
         cleanupArmed = true
     }
 
@@ -213,6 +219,21 @@ final class PanelModel: EngineListener {
         guard cleanupArmed, canCleanup else { return }
         cleanupArmed = false
         engine.cleanup()
+    }
+
+    func armDelete(_ id: Int) {
+        cleanupArmed = false
+        deleteArmedId = id
+    }
+
+    func cancelDelete() { deleteArmedId = nil }
+
+    /// Removes the SMS from this Mac only; a copy on the module is left for
+    /// cleanup to free and is never shown again.
+    func confirmDelete() {
+        guard let id = deleteArmedId, canDelete else { return }
+        deleteArmedId = nil
+        engine.deleteMessage(id)
     }
 
     /// Only silences the warning; nothing is ever sent again from here.
@@ -246,6 +267,7 @@ final class PanelModel: EngineListener {
     /// The body is fetched only for the row the user opened, and dropped again
     /// as soon as that row closes.
     func reveal(_ id: Int) {
+        if deleteArmedId != id { deleteArmedId = nil }
         expandedId = id
         revealFailed = false
         copied = ""
@@ -260,6 +282,7 @@ final class PanelModel: EngineListener {
 
     func collapse() {
         expandedId = nil
+        deleteArmedId = nil
         wantShow = false
         revealFailed = false
         copied = ""
@@ -427,6 +450,8 @@ final class PanelModel: EngineListener {
     func escape() {
         if cleanupArmed {
             cancelCleanup()
+        } else if deleteArmedId != nil {
+            cancelDelete()
         } else if mode == "compose" {
             if pending != nil {
                 invalidatePreview()
@@ -506,6 +531,7 @@ final class PanelModel: EngineListener {
         revealFailed = false
         copied = ""
         cleanupArmed = false
+        deleteArmedId = nil
         engine.cleaned = nil
         releaseHold()
         focus = nil
@@ -541,6 +567,7 @@ final class PanelModel: EngineListener {
     func engineReceived(_ messages: [IncomingMessage]) { onIncoming?(messages) }
     func engineShowed(_ id: Int) { onShown?(id) }
     func engineMarkedAllRead() { onAllRead?() }
+    func engineDeleted(_ id: Int) { onDeleted?(id) }
     func engineSnapshotWillChange() { cursorBeforeSync = cursorId() }
     func engineSnapshotDidChange() {
         keepCursor(on: cursorBeforeSync)

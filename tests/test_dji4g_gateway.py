@@ -260,6 +260,92 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(after_restart.duplicate)
         self.assertEqual(len(self.store.list_messages()), 1)
 
+    def test_deleted_message_is_wiped_and_not_ingested_again(self):
+        # Long enough that SQLite would otherwise leave the old text in a freeblock.
+        secret = "验证码 123456，" + "请勿泄露" * 60
+        kept = self.store.ingest(incoming("0011AA", "keep me"))
+        gone = self.store.ingest(incoming("0011AB", secret))
+        later = self.store.ingest(incoming("0011AC", "later"))
+
+        self.assertTrue(self.store.delete_message(gone.message_id))
+        self.assertFalse(self.store.delete_message(gone.message_id))
+        for value in (None, 0, -1, True, "1", later.message_id + 99):
+            self.assertFalse(self.store.delete_message(value))
+        self.assertIsNone(self.store.get_message(gone.message_id))
+        ids = [later.message_id, kept.message_id]
+        self.assertEqual([m["id"] for m in self.store.list_messages()], ids)
+        self.assertEqual([m["id"] for m in self.store.list_messages(storage="ME")], ids)
+        self.assertEqual([m["id"] for m in self.store.list_messages(after_id=0)], ids[::-1])
+        self.assertEqual(self.store.list_messages(after_id=0, storage="ME"), self.store.list_messages(after_id=0))
+
+        # Still on the module: the next poll sees a duplicate, not a new SMS.
+        again = self.store.ingest(incoming("0011AB", secret))
+        self.assertTrue(again.duplicate)
+        self.assertEqual(len(self.store.list_messages()), 2)
+        self.store.close()
+        self.store = dji4g_gateway.GatewayStore(self.data_dir)
+        self.assertTrue(self.store.ingest(incoming("0011AB", secret)).duplicate)
+        self.assertEqual(len(self.store.list_messages()), 2)
+        self.store.close()
+        raw = self.store.database_path.read_bytes()
+        self.assertNotIn("123456".encode(), raw)
+        self.assertNotIn("请勿泄露".encode(), raw)
+        self.assertNotIn(b"0011AB", raw)
+        self.assertIn(b"keep me", raw)
+        self.store = dji4g_gateway.GatewayStore(self.data_dir)
+
+    def test_deleting_a_long_sms_wipes_every_segment(self):
+        self.store.ingest(incoming("00A2", "world 654321", reference=9, total=2, part=2))
+        complete = self.store.ingest(incoming("00A1", "hello ", reference=9, total=2, part=1))
+
+        self.assertTrue(self.store.delete_message(complete.message_id))
+        self.assertEqual(self.store.list_messages(), [])
+        self.assertTrue(self.store.ingest(incoming("00A2", "world 654321", reference=9, total=2, part=2)).duplicate)
+        self.assertEqual(self.store.list_messages(), [])
+        dump = "\n".join(self.store._connection.iterdump())
+        self.assertNotIn("654321", dump)
+        self.assertNotIn("8613800000000", dump)
+
+    def test_messages_without_a_deleted_column_are_migrated(self):
+        legacy_dir = Path(self.temp.name) / "legacy messages"
+        legacy_dir.mkdir()
+        connection = sqlite3.connect(legacy_dir / "gateway.sqlite3")
+        connection.execute(
+            """
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                direction TEXT NOT NULL CHECK(direction IN ('inbound', 'outbound')),
+                fingerprint TEXT NOT NULL UNIQUE,
+                peer TEXT NOT NULL,
+                body TEXT NOT NULL,
+                raw_pdu TEXT,
+                storage TEXT,
+                storage_index INTEGER,
+                modem_status TEXT,
+                encoding TEXT,
+                received_at TEXT,
+                complete INTEGER NOT NULL DEFAULT 1,
+                concat_reference TEXT,
+                concat_total INTEGER,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO messages (direction, fingerprint, peer, body, created_at) "
+            "VALUES ('inbound', 'f', '10086', 'old', '2026-10-01T00:00:00Z')"
+        )
+        connection.commit()
+        connection.close()
+
+        migrated = dji4g_gateway.GatewayStore(legacy_dir)
+        try:
+            self.assertEqual([m["body"] for m in migrated.list_messages()], ["old"])
+            self.assertTrue(migrated.delete_message(1))
+            self.assertEqual(migrated.list_messages(), [])
+        finally:
+            migrated.close()
+
     def test_single_part_concat_is_stored_as_a_complete_message(self):
         result = self.store.ingest(
             incoming("0011AB", "single", reference=7, total=1, part=1)
@@ -620,6 +706,24 @@ class GatewayWorkerTests(unittest.TestCase):
         self.assertEqual(storage["SM"]["used"], 0)
         self.assertEqual(modem.max_active, 1)
         self.assertEqual(len(modem.thread_ids), 1)
+
+    def test_locally_deleted_sms_stays_deleted_and_cleanup_frees_its_slot(self):
+        modem = StorageModem({"ME": [slot(incoming("001101", "first"), "ME", 0)]})
+        self.gateway = dji4g_gateway.SmsGateway(
+            self.store,
+            modem_factory=lambda: modem,
+            poll_interval=60,
+            status_interval=60,
+        )
+        self.gateway.start()
+        self.assertTrue(wait_until(lambda: len(self.store.list_messages()) == 1))
+        self.assertTrue(self.store.delete_message(self.store.list_messages()[0]["id"]))
+
+        self.assertEqual(self.gateway.poll_now(), 0)
+        self.assertEqual(self.store.list_messages(), [])
+        self.assertEqual(self.gateway.cleanup_storage(timeout=2), {"deleted": 1, "kept": 0})
+        self.assertEqual(modem.slots["ME"], [])
+        self.assertEqual(self.store.list_messages(), [])
 
     def test_cleanup_refusal_leaves_the_modem_connected(self):
         modem = FakeModem()

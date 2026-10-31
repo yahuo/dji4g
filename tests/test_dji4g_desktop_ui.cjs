@@ -17,7 +17,7 @@ function service() {
   context.root = context;
   vm.createContext(context);
   const names = ['request', 'showMessage', 'prepare', 'submit', 'clearSensitive', 'receive',
-    'syncDevice', 'applyDevice', 'forget', 'cleanup'];
+    'syncDevice', 'applyDevice', 'forget', 'cleanup', 'deleteMessage'];
   for (const name of names) {
     const body = source.match(new RegExp('  function ' + name + '\\([^]*?\\n  }'));
     assert.ok(body, name);
@@ -82,6 +82,15 @@ test('cleanup is always confirmed and its counts come only from its own reply', 
   assert.equal(s.cleaned.kept, 1);
   s.forget();
   assert.equal(s.cleaned, null);
+});
+
+test('delete is always confirmed and names exactly one message', () => {
+  const s = service();
+  s.deleteMessage(7);
+  s.deleteMessage(8);
+  assert.deepEqual(s.writes, [{ action: 'delete', id: 7, confirmed: true }]);
+  s.reply({ type: 'snapshot', action: 'delete', online: true, ready: true, messages: [], deleted: 7 });
+  assert.equal(s.busy, false);
 });
 
 test('background snapshots do not release an in-flight action', () => {
@@ -199,14 +208,13 @@ test('the hot-plug pieces name each other consistently', () => {
 });
 
 const panelSource = fs.readFileSync(path.join(__dirname, '../deploy/omarchy/dji4g.sms/Panel.qml'), 'utf8');
-function panel() {
-  const context = {};
+function panel(names = ['findCode', 'estimate'], context = {}) {
   vm.createContext(context);
   const basic = panelSource.match(/readonly property string gsmBasic: ("[^\n]*")\n\s*\+ ("[^\n]*")/);
   const extension = panelSource.match(/readonly property string gsmExtension: ("[^\n]*")/);
   assert.ok(basic && extension);
   vm.runInContext(`var gsmBasic = ${basic[1]} + ${basic[2]}; var gsmExtension = ${extension[1]};`, context);
-  for (const name of ['findCode', 'estimate']) {
+  for (const name of names) {
     const body = panelSource.match(new RegExp('  function ' + name + '\\([^]*?\\n  }'));
     assert.ok(body, name);
     vm.runInContext(body[0], context);
@@ -246,6 +254,44 @@ test('a code is offered only when the text names one, and never a fragment of a 
   assert.equal(p.findCode('验证码请致电 13800138000'), '');
   assert.equal(p.findCode('code AB1234'), '');
   assert.equal(p.findCode(''), '');
+});
+
+test('a message is deleted only from its own confirmed prompt', () => {
+  const deleted = [];
+  const p = panel(['armDelete', 'cancelDelete', 'confirmDelete', 'reveal', 'collapse', 'armCleanup'], {
+    deleteArmedId: -1, cleanupArmed: false, cleanupAvailable: true, canDelete: true,
+    expandedId: -1, wantShow: false, revealFailed: false, copied: '',
+    service: { busy: false, pendingAction: '', detail: null, cleaned: null,
+      showMessage: () => true, deleteMessage: id => deleted.push(id) },
+  });
+  p.confirmDelete();
+  assert.deepEqual(deleted, []);
+
+  p.reveal(1);
+  p.armDelete(1);
+  p.reveal(1);
+  assert.equal(p.deleteArmedId, 1);
+  p.reveal(2);
+  assert.equal(p.deleteArmedId, -1);
+  p.armDelete(2);
+  p.armCleanup();
+  assert.equal(p.deleteArmedId, -1);
+  p.armDelete(2);
+  assert.equal(p.cleanupArmed, false);
+  p.collapse();
+  assert.equal(p.deleteArmedId, -1);
+
+  p.reveal(2);
+  p.armDelete(2);
+  p.canDelete = false;
+  p.confirmDelete();
+  assert.deepEqual(deleted, []);
+  assert.equal(p.deleteArmedId, 2);
+  p.canDelete = true;
+  p.confirmDelete();
+  p.confirmDelete();
+  assert.deepEqual(deleted, [2]);
+  assert.equal(p.deleteArmedId, -1);
 });
 
 test('the panel cannot be summoned over IPC while the module is unplugged', () => {
